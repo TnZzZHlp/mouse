@@ -15,7 +15,7 @@ impl MouseDriver for X1Pro {
     }
     fn matches(&self, descriptor: HidDescriptor) -> bool {
         descriptor.vendor_id == 0x373b
-            && matches!(descriptor.product_id, 0x1016 | 0x101b)
+            && matches!(descriptor.product_id, 0x1016 | 0x101a | 0x101b)
             && descriptor.usage_page == 0xff02
             && descriptor.usage == 2
     }
@@ -31,7 +31,7 @@ impl MouseDriver for X1Pro {
     }
     fn read_method(&self, descriptor: HidDescriptor) -> ReadMethod {
         ReadMethod::CompxBatteryQuery {
-            expected_model: (descriptor.product_id == 0x101b).then_some((2, 38)),
+            expected_model: matches!(descriptor.product_id, 0x101a | 0x101b).then_some((2, 38)),
         }
     }
     fn decode(&self, report: &[u8]) -> Option<Battery> {
@@ -122,17 +122,29 @@ mod tests {
             usage: 2,
         };
         assert!(X1Pro.matches(target));
-        let receiver = HidDescriptor {
-            product_id: 0x101b,
-            ..target
-        };
-        assert!(X1Pro.matches(receiver));
-        assert_eq!(
-            X1Pro.read_method(receiver),
-            ReadMethod::CompxBatteryQuery {
-                expected_model: Some((2, 38))
-            }
-        );
+        for product_id in [0x101a, 0x101b] {
+            let receiver = HidDescriptor {
+                product_id,
+                ..target
+            };
+            assert!(X1Pro.matches(receiver));
+            assert_eq!(X1Pro.connection_priority(receiver), 1);
+            assert_eq!(
+                X1Pro.read_method(receiver),
+                ReadMethod::CompxBatteryQuery {
+                    expected_model: Some((2, 38))
+                }
+            );
+            assert!(!X1Pro.matches(HidDescriptor {
+                usage_page: 0xff04,
+                ..receiver
+            }));
+            assert!(!X1Pro.matches(HidDescriptor {
+                usage: 0,
+                ..receiver
+            }));
+        }
+        assert_eq!(X1Pro.connection_priority(target), 2);
         assert_eq!(
             X1Pro.read_method(target),
             ReadMethod::CompxBatteryQuery {
@@ -145,10 +157,12 @@ mod tests {
                 ..target
             }));
         }
-        assert!(!X1Pro.matches(HidDescriptor {
-            product_id: 0x1017,
-            ..target
-        }));
+        for product_id in [0x1017, 0x101c] {
+            assert!(!X1Pro.matches(HidDescriptor {
+                product_id,
+                ..target
+            }));
+        }
         assert!(!X1Pro.matches(HidDescriptor {
             vendor_id: 0x24ae,
             ..target
@@ -157,10 +171,22 @@ mod tests {
 
     #[test]
     fn wireless_capture_preserves_actual_charging_status() {
-        let capture = [8, 4, 0, 0, 0, 2, 0x5f, 0, 0x10, 5, 0, 0, 0, 0, 0, 0, 0xd3];
-        let battery = decode(&capture).unwrap();
-        assert_eq!(battery.percent, 95);
-        assert_eq!(battery.charging, Charging::Discharging);
-        assert_eq!(battery.raw_charging, 0);
+        for (capture, percent) in [
+            (
+                [8, 4, 0, 0, 0, 2, 0x5f, 0, 0x10, 5, 0, 0, 0, 0, 0, 0, 0xd3],
+                95,
+            ),
+            (
+                [
+                    8, 4, 0, 0, 0, 2, 0x5a, 0, 0x0f, 0xe8, 0, 0, 0, 0, 0, 0, 0xf6,
+                ],
+                90,
+            ),
+        ] {
+            let battery = decode(&capture).unwrap();
+            assert_eq!(battery.percent, percent);
+            assert_eq!(battery.charging, Charging::Discharging);
+            assert_eq!(battery.raw_charging, 0);
+        }
     }
 }

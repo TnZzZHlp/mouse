@@ -1,4 +1,4 @@
-# ATK X1 PRO：8K 接收器电量协议
+# ATK X1 PRO：1K / 8K 接收器电量协议
 
 2026-10-03，Windows 实机验证。用户将 X1 PRO 从 USB 直连切换到已配对接收器。
 当前枚举到 **ATK Mouse 8K Dongle**：`373B:101B / REV_0216`，HID 厂商 `Compx`。
@@ -48,7 +48,7 @@ GetBatteryLevel 请求：
 
 ## 程序接入
 
-- `src/devices/atk/x1_pro.rs` 精确支持 `1016` 和已验证的 `101B` 状态集合。
+- `src/devices/atk/x1_pro.rs` 精确支持 `1016` 和已验证的 `101A` / `101B` 状态集合。
 - 有线优先级为 2，接收器为 1；有线消失后自动重连可选接收器。
 - `ReadMethod` 携带接收器预期型号，由独立 Compx 后端执行型号 GET。
 - `src/devices/protocols/compx.rs` 提供共享响应校验与型号解码，具体鼠标驱动保持纯解码。
@@ -62,4 +62,31 @@ cargo run --locked -- --probe --device atk-x1-pro
 ```
 
 原始 GET 请求/响应保留在 `target/atk-receiver-query.txt`。
-不扩宽支持到其他 1K/4K/8K 接收器 PID 或其他配对型号；蓝牙仍未验证。
+其他接收器 PID 或其他配对型号尚未验证；蓝牙仍未验证。
+
+## 1K 接收器补充验证（2026-10-08）
+
+本次连接为 **ATK Mouse 1K Dongle**：`373B:101A / REV_0211`，HID 厂商 `Compx`。
+电量通道仍为 `MI_01 / Col05 / FF02:0002`，Report 8 输入与输出各 17 字节；
+重建描述符与上述 8K 接收器电量通道相同。1K 接收器没有枚举到 `FF06:0002` 集合，
+程序只依赖已确认的电量集合。
+
+使用同一组固定型号和电量 GET 获取真实响应：
+
+```text
+型号响应：
+08 10 00 00 00 03 02 26 2D 00 00 00 00 00 00 00 E5
+
+电量响应：
+08 04 00 00 00 02 5A 00 0F E8 00 00 00 00 00 00 F6
+```
+
+型号为 **CID 2 / MID 38**；电量 **90%**，充电码 `00` 为未充电。
+两份响应均为成功状态，全部字节按 8 位回绕相加为 `55`。
+`101A` 与 `101B` 使用相同的配对型号核验；只有 `2/38` 才接受为 X1 PRO。
+
+```powershell
+cargo run --locked --example inspect_hid -- 373b 101a
+cargo run --locked --example query_atk -- 101a
+cargo run --locked -- --probe --device atk-x1-pro
+```

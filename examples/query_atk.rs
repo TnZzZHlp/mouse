@@ -9,8 +9,8 @@ fn main() -> Result<()> {
         u16::from_str_radix(value.trim_start_matches("0x"), 16)
     })?;
     anyhow::ensure!(
-        matches!(pid, 0x1016 | 0x101b),
-        "Only verified ATK wired/8K receiver PIDs allowed"
+        matches!(pid, 0x1016 | 0x101a | 0x101b),
+        "Only verified ATK wired/1K/8K receiver PIDs allowed"
     );
     let api = HidApi::new()?;
     let info = api
@@ -23,7 +23,7 @@ fn main() -> Result<()> {
         })
         .context("ATK X1 PRO Report 8 collection not connected")?;
     let device = info.open_device(&api)?;
-    if pid == 0x101b {
+    if matches!(pid, 0x101a | 0x101b) {
         let request = mouse::transport::compx::MODEL_REQUEST;
         println!("GET MODEL {request:02X?}");
         query(&device, &request, 0x10)?;

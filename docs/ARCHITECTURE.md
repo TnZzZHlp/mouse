@@ -33,7 +33,7 @@ docs/
   Rapoo VT7/PROTOCOL.md       已有协议证据
   Rapoo VT7/USB.md            有线 USB 抓包、描述符及模式差异
   ATK X1 PRO/PROTOCOL.md      主动电量 GET、字段及真实响应证据
-  ATK X1 PRO/WIRELESS.md      8K 接收器、配对型号校验及无线报告
+  ATK X1 PRO/WIRELESS.md      1K / 8K 接收器、配对型号校验及无线报告
 examples/
   capture_vt7.rs              同时被动监听 VT7 有线与接收器状态集合
   inspect_hid.rs              指定 VID/PID 的描述符检查及可选被动监听
@@ -87,8 +87,8 @@ Compx 每 15 秒查询、响应超时 3 秒、单次输入等待 1 秒；失败�
 未收到广播的新设备不会继承另一只设备的读数；扫描期间仍显示上一只实际报告的设备，
 身份和接收时间保持属于该设备。收到新设备广播后才切换展示。缓存仅在本次运行中保留。
 VT7 同时匹配有线 `4613` 和接收器 `1413`；两者共用解码，有线优先级较高。
-ATK X1 PRO 精确匹配 `373B:1016` 或 `101B` 的 `FF02:0002`，通过 `ReadMethod::CompxBatteryQuery` 选择主动后端。
-`101B` 还必须实际返回配对 CID/MID `2/38`；有线优先级较高。
+ATK X1 PRO 精确匹配 `373B:1016`、`101A` 或 `101B` 的 `FF02:0002`，通过 `ReadMethod::CompxBatteryQuery` 选择主动后端。
+`101A` / `101B` 还必须实际返回配对 CID/MID `2/38`；有线优先级较高。
 其他同 VID 型号和接收器 PID 未验证，不扩宽匹配范围。
 `--device` 可选择驱动 ID 或具体实例路径。若多个驱动将来共享相同集合，必须先完善型号识别，
 不能依赖注册顺序猜测型号。

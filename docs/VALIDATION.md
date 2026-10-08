@@ -65,3 +65,18 @@ USB 支持版正式程序实际收到有线 Report 7，显示“100% · 正在�
 设备名称显示补充：面板和托盘提示新增 `DeviceIdentity.name`，名称独立一行，
 缓存读数继续保持原设备名称；未知设备显示“未识别”。更新既有展示断言后 15 项测试通过。
 正式版重新编译并重启，启动目录副本已同步。
+
+## ATK 1K 接收器补充验证（2026-10-08）
+
+- PnP 和 HID 产品名称为 `ATK Mouse 1K Dongle`，USB `373B:101A / REV_0211`，HID 厂商 `Compx`。
+- 电量集合为 `MI_01 / Col05 / FF02:0002`；重建描述符确认 Report 8 输入和输出各 17 字节。
+- 只读型号 GET 返回 CID 2 / MID 38；1K 接收器同样须通过配对型号核验才接受为 X1 PRO。
+- 只读电量 GET 返回 `08 04 00 00 00 02 5A 00 0F E8 00 00 00 00 00 00 F6`，
+  90%、原始充电码 0、成功状态 0、回绕校验和 55。
+- 既有集合匹配测试覆盖 1K / 8K 接收器、错误 usage 和未支持 PID；无线解码测试加入 1K 真实抓包。
+- `cargo test --locked`：15 项测试通过；`cargo clippy --locked --all-targets -- -D warnings`：通过。
+- `cargo fmt --check` 和 `cargo build --release --locked`：通过；正式传输后端 `--probe` 返回 90%、未充电。
+- 启动目录副本已更新并重启，日志确认配对型号核验成功，托盘显示“ATK X1 PRO / 90% · 未充电”。
+- 旧版启动副本备份于 `target/deployment-backups/mouse-startup-before-atk-1k-20261008-100229.exe`。
+
+现场请求/响应及复现方法见 [1K / 8K 接收器协议](ATK%20X1%20PRO/WIRELESS.md)。
