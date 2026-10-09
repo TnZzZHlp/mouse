@@ -10,8 +10,13 @@ pub fn status_text(status: &Status) -> String {
     let battery = status.reading().map_or_else(
         || "电量：未知 · 充电状态：未知".into(),
         |reading| {
+            let label = if matches!(status, Status::Stale(_, _)) {
+                "上次状态"
+            } else {
+                "电量"
+            };
             format!(
-                "电量：{}% · {}",
+                "{label}：{}% · {}",
                 reading.battery.percent,
                 reading.battery.charging.label()
             )
@@ -21,7 +26,7 @@ pub fn status_text(status: &Status) -> String {
 }
 
 pub fn detail_text(status: &Status) -> String {
-    status.reading().map_or_else(
+    let mut detail = status.reading().map_or_else(
         || "上次广播：尚未收到".into(),
         |reading| {
             format!(
@@ -33,7 +38,11 @@ pub fn detail_text(status: &Status) -> String {
                 local_time(reading.received_at).unwrap_or_else(|| "时间不可用".into())
             )
         },
-    )
+    );
+    if matches!(status, Status::Stale(_, _)) {
+        detail.push_str("\n状态未更新，正在重新连接");
+    }
+    detail
 }
 
 fn local_time(time: SystemTime) -> Option<String> {
@@ -75,10 +84,17 @@ mod tests {
             kind: ReportKind::Broadcast,
         };
         let live = Status::Live(device.clone(), reading);
-        let stale = Status::Stale(device, Some(reading));
+        let stale = Status::Stale(device.clone(), Some(reading));
         assert_eq!(status_text(&live), "设备：Test Mouse\n电量：76% · 正在充电");
-        assert_eq!(status_text(&live), status_text(&stale));
-        assert_eq!(detail_text(&live), detail_text(&stale));
+        assert_eq!(
+            status_text(&stale),
+            "设备：Test Mouse\n上次状态：76% · 正在充电"
+        );
+        assert_eq!(
+            detail_text(&stale),
+            format!("{}\n状态未更新，正在重新连接", detail_text(&live))
+        );
+        assert_eq!(live.reading(), stale.reading());
         let detail = detail_text(&live);
         assert!(detail.starts_with("上次广播：2026-10-"), "{detail}");
         assert!(!detail.contains("时间不可用"));
@@ -94,6 +110,36 @@ mod tests {
             status_text(&queried),
             "设备：Query Mouse\n电量：76% · 正在充电"
         );
+        // A receiver timeout while plugging in a charger must not present the
+        // previous discharging report as a current charging measurement.
+        let discharging = Reading {
+            battery: Battery {
+                charging: Charging::Discharging,
+                raw_charging: 0,
+                ..reading.battery
+            },
+            kind: ReportKind::QueryResponse,
+            ..reading
+        };
+        let stale = Status::Stale(device.clone(), Some(discharging));
+        assert_eq!(
+            status_text(&stale),
+            "设备：Test Mouse\n上次状态：76% · 未充电"
+        );
+        assert!(detail_text(&stale).starts_with("上次上报：2026-10-"));
+        assert!(detail_text(&stale).ends_with("状态未更新，正在重新连接"));
+        let recovered = Status::Live(
+            device,
+            Reading {
+                kind: ReportKind::QueryResponse,
+                ..reading
+            },
+        );
+        assert_eq!(
+            status_text(&recovered),
+            "设备：Test Mouse\n电量：76% · 正在充电"
+        );
+        assert!(!detail_text(&recovered).contains("重新连接"));
     }
 
     fn device_for_query() -> DeviceIdentity {
