@@ -7,7 +7,8 @@ edition = "2024"
 anyhow = "1.0"
 hidapi = { version = "2.6.7", default-features = false, features = ["windows-native"] }
 tray-icon = { version = "0.24.2", default-features = false }
-winsafe = { version = "0.0.29", default-features = false, features = ["gui", "user"] }
+winsafe = { version = "0.0.29", default-features = false, features = ["user"] }
+gpui = { version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
 
 [lints]
 workspace = true

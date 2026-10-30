@@ -1,3 +1,6 @@
+mod fleet;
+pub use fleet::watch_all;
+
 use crate::{
     model::{Battery, DeviceIdentity, Reading, ReportKind, Status},
     transport::BatteryTransport,

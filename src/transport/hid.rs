@@ -2,7 +2,7 @@ use crate::{
     devices::{self, MouseDriver, ReadMethod},
     diagnostics::log,
     model::{Battery, DeviceIdentity, HidDescriptor},
-    transport::{BatteryConnection, BatteryTransport},
+    transport::{BatteryConnection, BatteryTransport, DeviceDiscovery},
 };
 use anyhow::{Context, Result};
 use hidapi::{DeviceInfo, HidApi, HidDevice};
@@ -47,6 +47,12 @@ pub fn list() -> Result<Vec<DeviceIdentity>> {
         .device_list()
         .filter_map(|info| identify(info).map(|(_, identity)| identity))
         .collect())
+}
+
+impl DeviceDiscovery for HidTransport {
+    fn discover(&mut self) -> Result<Vec<DeviceIdentity>> {
+        list()
+    }
 }
 
 impl BatteryTransport for HidTransport {

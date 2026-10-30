@@ -45,6 +45,74 @@ pub fn detail_text(status: &Status) -> String {
     detail
 }
 
+pub fn device_summary(state: &mouse::fleet::DeviceState) -> String {
+    use mouse::fleet::Availability;
+    let availability = match state.availability {
+        Availability::Waiting => "等待报告",
+        Availability::Live => "在线",
+        Availability::Stale => "数据过期",
+        Availability::Offline => "离线",
+    };
+    state.reading.map_or_else(
+        || format!("{availability} · 电量未知"),
+        |reading| {
+            let prefix = if state.availability == Availability::Live {
+                ""
+            } else {
+                "上次 "
+            };
+            format!(
+                "{availability} · {prefix}{}% · {}",
+                reading.battery.percent,
+                reading.battery.charging.label()
+            )
+        },
+    )
+}
+
+pub fn connection_label(state: &mouse::fleet::DeviceState) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    state.identity.id.hash(&mut hasher);
+    format!(
+        "{} · {:08x}",
+        state.identity.driver,
+        hasher.finish() & 0xffff_ffff
+    )
+}
+
+pub fn fleet_tooltip(fleet: &mouse::fleet::Fleet) -> String {
+    if fleet.devices.is_empty() {
+        return fleet
+            .discovery_error
+            .clone()
+            .unwrap_or_else(|| "正在查找支持的鼠标".into());
+    }
+    let text = fleet
+        .devices
+        .values()
+        .enumerate()
+        .map(|(index, state)| {
+            format!(
+                "{} · {}: {}",
+                state.identity.name,
+                index + 1,
+                device_summary(state)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut tooltip = String::new();
+    for character in text.chars() {
+        if tooltip.encode_utf16().count() + character.len_utf16() > 120 {
+            tooltip.push_str("...");
+            break;
+        }
+        tooltip.push(character);
+    }
+    tooltip
+}
+
 fn local_time(time: SystemTime) -> Option<String> {
     // FILETIME counts 100 ns intervals from 1601-01-01; SystemTime uses 1970.
     let elapsed = time.duration_since(UNIX_EPOCH).ok()?;

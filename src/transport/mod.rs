@@ -15,6 +15,10 @@ pub trait BatteryConnection: Send {
     fn read(&mut self) -> Result<Option<Battery>>;
 }
 
+pub trait DeviceDiscovery {
+    fn discover(&mut self) -> Result<Vec<DeviceIdentity>>;
+}
+
 pub trait BatteryTransport: Send {
     fn connect(&mut self, selector: Option<&str>) -> Result<Box<dyn BatteryConnection>>;
 }

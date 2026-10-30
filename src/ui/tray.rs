@@ -1,11 +1,13 @@
-use super::{
-    icon,
-    presentation::{detail_text, status_text},
-};
+use super::{icon, panel::Panel, presentation};
 use anyhow::Result;
+use gpui::{
+    App, AppContext, Application, Context, Entity, IntoElement, Render, Timer, Window,
+    WindowBounds, WindowHandle, WindowKind, WindowOptions, div, px, size,
+};
 use mouse::{
     diagnostics::{instance_lock, log},
-    model::{Battery, Charging, DeviceIdentity, Reading, ReportKind, Status},
+    fleet::Fleet,
+    model::Status,
     monitor,
     transport::hid::HidTransport,
 };
@@ -18,155 +20,144 @@ use std::{
         mpsc::{self, Receiver, Sender},
     },
     thread::{self, JoinHandle},
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, Instant},
 };
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
-use winsafe::{co, gui, prelude::*};
 
 enum Event {
-    Status(Status),
+    Snapshot(Fleet),
     Popup { x: i32, y: i32 },
 }
 
-struct App {
-    window: gui::WindowMain,
-    status_label: gui::Label,
-    detail_label: gui::Label,
-    tray: Option<TrayIcon>,
-    status: Option<Status>,
-    receiver: Receiver<Event>,
-    sender: Sender<Event>,
+struct Monitor {
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
-    deadline: Option<Instant>,
-    demo: bool,
-    demo_opened: bool,
-    selector: Option<String>,
 }
 
-impl App {
-    fn initialize(&mut self) -> Result<()> {
-        // No native popup menu: regular modeless controls remain responsive
-        // when the charging cable changes the mouse's USB/input devices.
-        self.tray = Some(
-            TrayIconBuilder::new()
-                .with_tooltip(format!(
-                    "{}\n{}",
-                    status_text(&Status::Searching),
-                    detail_text(&Status::Searching)
-                ))
-                .with_icon(icon::render(&Status::Searching))
-                .build()?,
-        );
-        self.window.hwnd().SetTimer(1, 100, None)?;
-        log("Tray created; modeless popup ready; automatic discovery enabled");
-        let sender = self.sender.clone();
-        let stop = Arc::clone(&self.stop);
-        let selector = self.selector.clone();
-        let demo = self.demo;
-        self.worker = Some(thread::spawn(move || {
+impl Monitor {
+    fn start(sender: Sender<Event>, demo: bool, selector: Option<String>) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let worker = thread::spawn(move || {
             if demo {
-                for state in demo_states().into_iter().cycle() {
-                    if stop.load(Ordering::Relaxed) {
-                        break;
+                let mut step = 0;
+                while !worker_stop.load(Ordering::Relaxed) {
+                    if sender
+                        .send(Event::Snapshot(super::demo::snapshot(step)))
+                        .is_err()
+                    {
+                        return;
                     }
-                    let _ = sender.send(Event::Status(state));
+                    step += 1;
                     for _ in 0..40 {
-                        if stop.load(Ordering::Relaxed) {
+                        if worker_stop.load(Ordering::Relaxed) {
                             return;
                         }
                         thread::sleep(Duration::from_millis(100));
                     }
                 }
             } else {
-                monitor::watch(
-                    HidTransport::default(),
+                monitor::watch_all(
+                    HidTransport::default,
                     selector.as_deref(),
-                    &stop,
-                    |state| {
-                        let _ = sender.send(Event::Status(state));
+                    &worker_stop,
+                    |fleet| {
+                        let _ = sender.send(Event::Snapshot(fleet));
                     },
                 );
             }
-        }));
-        Ok(())
+        });
+        Self {
+            stop,
+            worker: Some(worker),
+        }
     }
+}
 
-    fn update(&mut self, status: Status) -> Result<()> {
-        if self.status.as_ref() == Some(&status) {
-            return Ok(());
-        }
-        let text = status_text(&status);
-        let detail = detail_text(&status);
-        if self.status.as_ref().is_some_and(|previous| {
-            status_text(previous) == text && detail_text(previous) == detail
-        }) {
-            self.status = Some(status);
-            return Ok(());
-        }
-        self.status_label.hwnd().SetWindowText(&text)?;
-        self.detail_label.hwnd().SetWindowText(&detail)?;
-        if let Some(tray) = &self.tray {
-            tray.set_tooltip(Some(&format!("{text}\n{detail}")))?;
-            if self
-                .status
-                .as_ref()
-                .and_then(Status::reading)
-                .map(|reading| reading.battery)
-                != status.reading().map(|reading| reading.battery)
-            {
-                tray.set_icon(Some(icon::render(&status)))?;
-            }
-        }
-        log(&format!("Popup/tray updated: {text}; {detail}"));
-        self.status = Some(status);
-        Ok(())
-    }
-
-    fn show_popup(&self, x: i32, y: i32) -> Result<()> {
-        let rect = self.window.hwnd().GetWindowRect()?;
-        self.window.hwnd().SetWindowPos(
-            winsafe::HwndPlace::Place(co::HWND_PLACE::TOPMOST),
-            winsafe::POINT {
-                x: (x - (rect.right - rect.left)).max(0),
-                y: (y - (rect.bottom - rect.top) - 8).max(0),
-            },
-            winsafe::SIZE::default(),
-            co::SWP::NOSIZE,
-        )?;
-        self.window.hwnd().ShowWindow(co::SW::SHOW);
-        self.window.hwnd().SetForegroundWindow();
-        log(&format!(
-            "Modeless popup shown; visible={}",
-            self.window.hwnd().IsWindowVisible()
-        ));
-        Ok(())
-    }
-
-    fn tick(&mut self) -> Result<bool> {
-        while let Ok(event) = self.receiver.try_recv() {
-            match event {
-                Event::Status(status) => self.update(status)?,
-                Event::Popup { x, y } => self.show_popup(x, y)?,
-            }
-        }
-        if self.demo && !self.demo_opened {
-            self.demo_opened = true;
-            let point = winsafe::GetCursorPos()?;
-            self.show_popup(point.x, point.y)?;
-        }
-        Ok(self
-            .deadline
-            .is_some_and(|deadline| Instant::now() >= deadline))
-    }
-
-    fn shutdown(&mut self) {
+impl Drop for Monitor {
+    fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
-        self.tray.take();
         log("Tray exited");
+    }
+}
+
+struct Runtime {
+    fleet: Entity<Fleet>,
+    tray: TrayIcon,
+    icon_status: Status,
+    receiver: Receiver<Event>,
+    popup: Option<WindowHandle<Panel>>,
+    deadline: Option<Instant>,
+}
+
+impl Runtime {
+    fn tick(&mut self, cx: &mut Context<Self>) -> Result<()> {
+        while let Ok(event) = self.receiver.try_recv() {
+            match event {
+                Event::Snapshot(fleet) => {
+                    let status = fleet
+                        .lowest_live()
+                        .map_or(Status::Searching, mouse::fleet::DeviceState::status);
+                    let tooltip = presentation::fleet_tooltip(&fleet);
+                    self.tray.set_tooltip(Some(&tooltip))?;
+                    if status.reading().map(|reading| reading.battery)
+                        != self.icon_status.reading().map(|reading| reading.battery)
+                    {
+                        self.tray.set_icon(Some(icon::render(&status)))?;
+                        log(&presentation::status_text(&status));
+                    }
+                    self.icon_status = status;
+                    self.fleet.update(cx, |state, cx| {
+                        *state = fleet;
+                        cx.notify();
+                    });
+                }
+                Event::Popup { x, y } => self.show_popup(x, y, cx)?,
+            }
+        }
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            cx.quit();
+        }
+        Ok(())
+    }
+
+    fn show_popup(&mut self, x: i32, y: i32, cx: &mut Context<Self>) -> Result<()> {
+        if let Some(popup) = self.popup.take() {
+            let _ = popup.update(cx, |_, window, _| window.remove_window());
+        }
+        let fleet = self.fleet.clone();
+        let count = fleet.read(cx).devices.len();
+        let height = f32::from(u16::try_from(count.clamp(1, 4))?).mul_add(134., 112.);
+        let (bounds, display_id) =
+            super::position::popup_bounds(x, y, size(px(380.), px(height)), cx)?;
+        self.popup = Some(cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: None,
+                kind: WindowKind::PopUp,
+                is_resizable: false,
+                is_minimizable: false,
+                display_id,
+                ..Default::default()
+            },
+            |window, cx| {
+                window.activate_window();
+                cx.new(|cx| Panel::new(fleet, window, cx))
+            },
+        )?);
+        Ok(())
+    }
+}
+
+impl Render for Runtime {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
     }
 }
 
@@ -189,140 +180,81 @@ pub fn run(duration: Option<Duration>, demo: bool, selector: Option<String>) -> 
             });
         }
     }));
-    let window = gui::WindowMain::new(gui::WindowMainOpts {
-        title: "鼠标电量",
-        size: gui::dpi(360, 160),
-        style: co::WS::CAPTION | co::WS::SYSMENU | co::WS::BORDER | co::WS::CLIPCHILDREN,
-        ex_style: co::WS_EX::TOPMOST,
-        ..Default::default()
-    });
-    let status_label = gui::Label::new(
-        &window,
-        gui::LabelOpts {
-            text: "设备：未识别\n电量：未知 · 充电状态：未知",
-            position: gui::dpi(16, 16),
-            size: gui::dpi(328, 48),
-            ..Default::default()
-        },
-    );
-    let detail_label = gui::Label::new(
-        &window,
-        gui::LabelOpts {
-            text: "上次广播：尚未收到",
-            position: gui::dpi(16, 68),
-            size: gui::dpi(328, 34),
-            ..Default::default()
-        },
-    );
-    let close_button = gui::Button::new(
-        &window,
-        gui::ButtonOpts {
-            text: "关闭面板",
-            position: gui::dpi(160, 116),
-            ..Default::default()
-        },
-    );
-    let exit_button = gui::Button::new(
-        &window,
-        gui::ButtonOpts {
-            text: "退出",
-            position: gui::dpi(256, 116),
-            ..Default::default()
-        },
-    );
-    let app = Rc::new(RefCell::new(App {
-        window: window.clone(),
-        status_label,
-        detail_label,
-        tray: None,
-        status: None,
-        receiver,
-        sender,
-        stop: Arc::new(AtomicBool::new(false)),
-        worker: None,
-        deadline: duration.map(|time| Instant::now() + time),
-        demo,
-        demo_opened: false,
-        selector,
-    }));
-    let app_create = Rc::clone(&app);
-    window.on().wm_create(move |_| {
-        app_create.borrow_mut().initialize()?;
-        Ok(0)
-    });
-    let app_timer = Rc::clone(&app);
-    let timer_window = window.clone();
-    window.on().wm_timer(1, move || {
-        let exit = app_timer.borrow_mut().tick()?;
-        if exit {
-            timer_window.hwnd().DestroyWindow()?;
+    let _monitor = Monitor::start(sender.clone(), demo, selector);
+    let error = Rc::new(RefCell::new(None));
+    let launch_error = Rc::clone(&error);
+    Application::new().run(move |cx| {
+        if let Err(error) = launch(receiver, duration, Rc::clone(&launch_error), cx) {
+            *launch_error.borrow_mut() = Some(error);
+            cx.quit();
+            return;
         }
-        Ok(())
-    });
-    let close_window = window.clone();
-    close_button.on().bn_clicked(move || {
-        close_window.hwnd().ShowWindow(co::SW::HIDE);
-        log("Popup closed");
-        Ok(())
-    });
-    let exit_window = window.clone();
-    exit_button.on().bn_clicked(move || {
-        log("Exit button clicked");
-        exit_window.hwnd().DestroyWindow()?;
-        Ok(())
-    });
-    let inactive_window = window.clone();
-    window.on().wm_activate(move |params| {
-        if params.event == co::WA::INACTIVE {
-            inactive_window.hwnd().ShowWindow(co::SW::HIDE);
+        if demo {
+            match winsafe::GetCursorPos() {
+                Ok(position) => {
+                    let _ = sender.send(Event::Popup {
+                        x: position.x,
+                        y: position.y,
+                    });
+                }
+                Err(error) => log(&format!("Demo cursor position unavailable: {error}")),
+            }
         }
-        Ok(())
     });
-    let hide_window = window.clone();
-    window.on().wm_close(move || {
-        hide_window.hwnd().ShowWindow(co::SW::HIDE);
-        Ok(())
-    });
-    let app_destroy = Rc::clone(&app);
-    window.on().wm_destroy(move || {
-        app_destroy.borrow_mut().shutdown();
-        Ok(())
-    });
-    window
-        .run_main(Some(co::SW::HIDE))
-        .map_err(|error| anyhow::anyhow!("Windows 界面错误：{error}"))?;
-    Ok(())
+    TrayIconEvent::set_event_handler(None::<fn(TrayIconEvent)>);
+    error.borrow_mut().take().map_or(Ok(()), Err)
 }
 
-fn demo_states() -> Vec<Status> {
-    let identity = DeviceIdentity {
-        id: "demo".into(),
-        driver: "demo",
-        name: "演示鼠标",
-    };
-    let mut states = vec![Status::Waiting(identity.clone())];
-    for (percent, charging) in [
-        (76, Charging::Discharging),
-        (18, Charging::Discharging),
-        (42, Charging::Active),
-        (42, Charging::Discharging),
-        (100, Charging::Full),
-    ] {
-        states.push(Status::Live(
-            identity.clone(),
-            Reading {
-                battery: Battery {
-                    percent,
-                    charging,
-                    raw_charging: 0,
-                    dpi: None,
-                },
-                received_at: SystemTime::now(),
-                kind: ReportKind::Broadcast,
-            },
-        ));
-    }
-    states.push(Status::Stale(identity, None));
-    states.push(Status::Offline("演示：设备断开".into()));
-    states
+fn launch(
+    receiver: Receiver<Event>,
+    duration: Option<Duration>,
+    runtime_error: Rc<RefCell<Option<anyhow::Error>>>,
+    cx: &mut App,
+) -> Result<()> {
+    let tray = TrayIconBuilder::new()
+        .with_tooltip("正在查找支持的鼠标")
+        .with_icon(icon::render(&Status::Searching))
+        .build()?;
+    let fleet = cx.new(|_| Fleet::default());
+    cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::centered(size(px(1.), px(1.)), cx)),
+            show: false,
+            focus: false,
+            titlebar: None,
+            kind: WindowKind::PopUp,
+            ..Default::default()
+        },
+        |_, cx| {
+            cx.new(|cx: &mut Context<Runtime>| {
+                cx.spawn(async move |this, cx| {
+                    loop {
+                        Timer::after(Duration::from_millis(100)).await;
+                        let result = this.update(cx, Runtime::tick);
+                        match result {
+                            Ok(Ok(())) => {}
+                            Ok(Err(error)) => {
+                                log(&format!("GPUI tray update failed: {error:#}"));
+                                *runtime_error.borrow_mut() = Some(error);
+                                let _ = cx.update(|cx| cx.quit());
+                                break;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                })
+                .detach();
+                Runtime {
+                    fleet,
+                    tray,
+                    icon_status: Status::Searching,
+                    receiver,
+                    popup: None,
+                    deadline: duration.map(|time| Instant::now() + time),
+                }
+            })
+        },
+    )?;
+    log("GPUI tray ready; concurrent device monitoring enabled");
+    Ok(())
 }
