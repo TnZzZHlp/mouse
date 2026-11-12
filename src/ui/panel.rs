@@ -3,11 +3,20 @@ use mouse::fleet::{Availability, DeviceState, Fleet};
 
 pub struct Panel {
     fleet: Entity<Fleet>,
+    performance: [Option<Entity<super::performance::Performance>>; 2],
+    automation: Entity<super::automation::Automation>,
+    page: usize,
+    wireless: bool,
     _subscriptions: Vec<Subscription>,
 }
 
 impl Panel {
-    pub fn new(fleet: Entity<Fleet>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        fleet: Entity<Fleet>,
+        automation: Entity<super::automation::Automation>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let updates = cx.observe(&fleet, |_, _, cx| cx.notify());
         let activation = cx.observe_window_activation(window, |_, window, _| {
             if !window.is_window_active() {
@@ -16,6 +25,10 @@ impl Panel {
         });
         Self {
             fleet,
+            performance: [None, None],
+            wireless: true,
+            automation,
+            page: 0,
             _subscriptions: vec![updates, activation],
         }
     }
@@ -25,8 +38,7 @@ impl Render for Panel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let fleet = self.fleet.read(cx);
         let rows = fleet
-            .devices
-            .values()
+            .connected()
             .enumerate()
             .map(|(index, state)| device_row(state, index + 1))
             .collect::<Vec<_>>();
@@ -34,7 +46,7 @@ impl Render for Panel {
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(0x0016_1b22))
+            .bg(rgb(0x0011_1822))
             .text_color(rgb(0x00e6_edf3))
             .font_family("Microsoft YaHei UI")
             .text_sm()
@@ -49,18 +61,81 @@ impl Render for Panel {
                         div()
                             .text_base()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("鼠标电量"),
+                            .child("鼠标控制中心"),
                     )
-                    .child(format!("{} 台", fleet.devices.len())),
+                    .child(format!("{} 台", rows.len())),
             )
+            .child(
+                div().flex().gap_2().children(
+                    ["电量", "性能", "自动切换"]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, label)| {
+                            super::performance::choice(
+                                ("page", index),
+                                label,
+                                self.page == index,
+                                false,
+                            )
+                            .on_click(cx.listener(
+                                move |view, _, _, cx| {
+                                    view.page = index;
+                                    if index == 1
+                                        && view.performance[usize::from(view.wireless)].is_none()
+                                    {
+                                        view.performance[usize::from(view.wireless)] =
+                                            Some(cx.new(|cx| {
+                                                super::performance::Performance::new(
+                                                    view.wireless,
+                                                    cx,
+                                                )
+                                            }));
+                                    }
+                                    cx.notify();
+                                },
+                            ))
+                        }),
+                ),
+            )
+            .when(self.page == 1, |this| {
+                this.child(
+                    div().flex().gap_2().children(
+                        [(false, "有线"), (true, "无线")]
+                            .into_iter()
+                            .map(|(wireless, label)| {
+                                super::performance::choice(
+                                    ("connection", usize::from(wireless)),
+                                    label,
+                                    self.wireless == wireless,
+                                    false,
+                                )
+                                .on_click(cx.listener(
+                                    move |view, _, _, cx| {
+                                        view.wireless = wireless;
+                                        if view.page == 1
+                                            && view.performance[usize::from(wireless)].is_none()
+                                        {
+                                            view.performance[usize::from(wireless)] =
+                                                Some(cx.new(|cx| {
+                                                    super::performance::Performance::new(
+                                                        wireless, cx,
+                                                    )
+                                                }));
+                                        }
+                                        cx.notify();
+                                    },
+                                ))
+                            }),
+                    ),
+                )
+            })
             .child(
                 div()
                     .id("devices")
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .children(rows)
-                    .when(fleet.devices.is_empty(), |this| {
+                    .when(rows.is_empty() && self.page == 0, |this| {
                         this.child(
                             div()
                                 .py_6()
@@ -68,6 +143,14 @@ impl Render for Panel {
                                 .child("正在查找支持的鼠标"),
                         )
                     })
+                    .when(self.page == 0, |this| this.children(rows))
+                    .when(self.page == 1, |this| {
+                        this.when_some(
+                            self.performance[usize::from(self.wireless)].clone(),
+                            gpui::ParentElement::child,
+                        )
+                    })
+                    .when(self.page == 2, |this| this.child(self.automation.clone()))
                     .when_some(fleet.discovery_error.clone(), |this, error| {
                         this.child(div().py_2().text_color(rgb(0x00f0_b66a)).child(error))
                     }),
@@ -120,8 +203,11 @@ fn device_row(state: &DeviceState, index: usize) -> impl IntoElement {
         .unwrap_or_default()
         .to_owned();
     div()
-        .py_3()
-        .border_b_1()
+        .p_3()
+        .mb_3()
+        .rounded_lg()
+        .bg(rgb(0x001c_2430))
+        .border_1()
         .border_color(rgb(0x0030_363d))
         .child(
             div()
@@ -135,12 +221,15 @@ fn device_row(state: &DeviceState, index: usize) -> impl IntoElement {
                         .flex_col()
                         .gap_1()
                         .child(format!("{} · {index}", state.identity.name))
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(0x008b_949e))
-                                .child(super::presentation::connection_label(state)),
-                        ),
+                        .child(div().text_xs().text_color(rgb(0x008b_949e)).child(
+                            if state.identity.id.to_ascii_lowercase().contains("pid_4660")
+                                || state.identity.id.to_ascii_lowercase().contains("pid_4613")
+                            {
+                                "USB 有线"
+                            } else {
+                                "无线接收器"
+                            },
+                        )),
                 )
                 .child(div().text_2xl().text_color(rgb(color)).child(percent)),
         )

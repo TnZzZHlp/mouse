@@ -48,6 +48,12 @@ pub struct Fleet {
 }
 
 impl Fleet {
+    pub fn connected(&self) -> impl Iterator<Item = &DeviceState> {
+        self.devices
+            .values()
+            .filter(|state| state.availability != Availability::Offline)
+    }
+
     pub fn apply(&mut self, mut update: DeviceState) {
         if let Some(previous) = self.devices.get(&update.identity.id)
             && update.reading.is_none()

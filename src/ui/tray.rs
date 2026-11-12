@@ -86,6 +86,7 @@ impl Drop for Monitor {
 
 struct Runtime {
     fleet: Entity<Fleet>,
+    automation: Entity<super::automation::Automation>,
     tray: TrayIcon,
     icon_status: Status,
     receiver: Receiver<Event>,
@@ -98,6 +99,8 @@ impl Runtime {
         while let Ok(event) = self.receiver.try_recv() {
             match event {
                 Event::Snapshot(fleet) => {
+                    self.automation
+                        .update(cx, |view, cx| view.observe(&fleet, cx));
                     let status = fleet
                         .lowest_live()
                         .map_or(Status::Searching, mouse::fleet::DeviceState::status);
@@ -128,14 +131,18 @@ impl Runtime {
     }
 
     fn show_popup(&mut self, x: i32, y: i32, cx: &mut Context<Self>) -> Result<()> {
+        log("Tray click received; opening panel");
         if let Some(popup) = self.popup.take() {
             let _ = popup.update(cx, |_, window, _| window.remove_window());
         }
         let fleet = self.fleet.clone();
-        let count = fleet.read(cx).devices.len();
-        let height = f32::from(u16::try_from(count.clamp(1, 4))?).mul_add(134., 112.);
+        let automation = self.automation.clone();
+        let count = fleet.read(cx).connected().count();
+        let height = f32::from(u16::try_from(count.clamp(1, 4))?)
+            .mul_add(134., 112.)
+            .max(580.);
         let (bounds, display_id) =
-            super::position::popup_bounds(x, y, size(px(380.), px(height)), cx)?;
+            super::position::popup_bounds(x, y, size(px(440.), px(height)), cx)?;
         self.popup = Some(cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -148,7 +155,7 @@ impl Runtime {
             },
             |window, cx| {
                 window.activate_window();
-                cx.new(|cx| Panel::new(fleet, window, cx))
+                cx.new(|cx| Panel::new(fleet, automation, window, cx))
             },
         )?);
         Ok(())
@@ -216,6 +223,7 @@ fn launch(
         .with_icon(icon::render(&Status::Searching))
         .build()?;
     let fleet = cx.new(|_| Fleet::default());
+    let automation = cx.new(super::automation::Automation::new);
     cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(1.), px(1.)), cx)),
@@ -246,6 +254,7 @@ fn launch(
                 .detach();
                 Runtime {
                     fleet,
+                    automation,
                     tray,
                     icon_status: Status::Searching,
                     receiver,

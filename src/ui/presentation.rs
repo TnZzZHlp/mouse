@@ -70,27 +70,15 @@ pub fn device_summary(state: &mouse::fleet::DeviceState) -> String {
     )
 }
 
-pub fn connection_label(state: &mouse::fleet::DeviceState) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::hash::DefaultHasher::new();
-    state.identity.id.hash(&mut hasher);
-    format!(
-        "{} · {:08x}",
-        state.identity.driver,
-        hasher.finish() & 0xffff_ffff
-    )
-}
-
 pub fn fleet_tooltip(fleet: &mouse::fleet::Fleet) -> String {
-    if fleet.devices.is_empty() {
+    if fleet.connected().next().is_none() {
         return fleet
             .discovery_error
             .clone()
             .unwrap_or_else(|| "正在查找支持的鼠标".into());
     }
     let text = fleet
-        .devices
-        .values()
+        .connected()
         .enumerate()
         .map(|(index, state)| {
             format!(

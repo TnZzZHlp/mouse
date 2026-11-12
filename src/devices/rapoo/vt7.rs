@@ -11,16 +11,16 @@ impl MouseDriver for Vt7 {
         "rapoo-vt7"
     }
     fn name(&self) -> &'static str {
-        "Rapoo VT7"
+        "Rapoo VT7 / VT7 V2"
     }
     fn matches(&self, descriptor: HidDescriptor) -> bool {
         descriptor.vendor_id == 0x24ae
-            && matches!(descriptor.product_id, 0x1413 | 0x4613)
+            && matches!(descriptor.product_id, 0x1413 | 0x1460 | 0x4613 | 0x4660)
             && descriptor.usage_page == 0xff00
             && descriptor.usage == 2
     }
     fn connection_priority(&self, descriptor: HidDescriptor) -> u8 {
-        u8::from(descriptor.product_id == 0x4613)
+        u8::from(matches!(descriptor.product_id, 0x4613 | 0x4660))
     }
     fn input_report_len(&self) -> usize {
         19
@@ -34,7 +34,10 @@ pub const fn decode(report: &[u8]) -> Option<Battery> {
     if report.len() < 19
         || report[0] != 7
         || report[8] > 100
-        || u16::from_le_bytes([report[13], report[14]]) != 0x4613
+        || !matches!(
+            u16::from_le_bytes([report[13], report[14]]),
+            0x4613 | 0x4660
+        )
     {
         return None;
     }
@@ -60,6 +63,26 @@ mod tests {
     const SAMPLE: [u8; 19] = [
         7, 0x10, 3, 0x4c, 4, 0x4c, 4, 0, 100, 0, 3, 1, 0, 0x13, 0x46, 1, 2, 2, 0xb6,
     ];
+
+    #[test]
+    fn vt7_v2_receiver_capture() {
+        let report = [
+            7, 0x20, 3, 0x4c, 4, 0x4c, 4, 1, 85, 0, 3, 1, 0, 0x60, 0x46, 1, 2, 2, 0xae,
+        ];
+        let battery = decode(&report).unwrap();
+        assert_eq!(battery.percent, 85);
+        assert_eq!(battery.charging, Charging::Discharging);
+    }
+
+    #[test]
+    fn vt7_v2_wired_capture() {
+        let report = [
+            7, 0x22, 3, 0x4c, 4, 0x4c, 4, 2, 84, 0, 3, 1, 0, 0x60, 0x46, 1, 2, 2, 0,
+        ];
+        let battery = decode(&report).unwrap();
+        assert_eq!(battery.percent, 84);
+        assert_eq!(battery.charging, Charging::Active);
+    }
 
     #[test]
     fn native_capture_and_charging_codes() {
@@ -106,7 +129,7 @@ mod tests {
             usage: 2,
         };
         assert!(Vt7.matches(target));
-        for product_id in [0x1413, 0x4613] {
+        for product_id in [0x1413, 0x4613, 0x4660] {
             let descriptor = HidDescriptor {
                 product_id,
                 ..target
