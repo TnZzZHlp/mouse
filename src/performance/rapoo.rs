@@ -13,9 +13,7 @@ pub fn automatic(wireless: bool) -> bool {
     AUTOMATIC[usize::from(wireless)].load(std::sync::atomic::Ordering::SeqCst)
 }
 pub const RATES: [u8; 7] = [8, 4, 2, 1, 132, 130, 129];
-pub const RATE_LABELS: [&str; 7] = [
-    "125 Hz", "250 Hz", "500 Hz", "1000 Hz", "2000 Hz", "4000 Hz", "8000 Hz",
-];
+pub use super::RATE_LABELS;
 pub const MODES: [&str; 6] = ["办公", "均衡", "火力", "超核", "竞技超核", "狂暴竞技"];
 pub const fn allowed_modes(rate: usize) -> &'static [u8] {
     match rate {

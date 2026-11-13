@@ -1,5 +1,5 @@
 use gpui::{Context, IntoElement, Render, Timer, Window, div, prelude::*, rgb};
-use mouse::performance::{self, Change, Settings};
+use mouse::performance::{self, Change, Device, Settings};
 use std::{
     sync::mpsc::{self, Receiver},
     time::Duration,
@@ -34,6 +34,7 @@ pub fn choice(
 }
 
 pub struct Performance {
+    device: Device,
     wireless: bool,
     locked: bool,
     settings: Option<Settings>,
@@ -41,13 +42,13 @@ pub struct Performance {
     message: String,
 }
 impl Performance {
-    pub fn new(wireless: bool, cx: &mut Context<Self>) -> Self {
+    pub fn new(device: Device, wireless: bool, cx: &mut Context<Self>) -> Self {
         cx.spawn(async move |this, cx| {
             loop {
                 Timer::after(Duration::from_millis(100)).await;
                 if this
                     .update(cx, |view, cx| {
-                        let locked = performance::automatic(view.wireless);
+                        let locked = view.device.automatic(view.wireless);
                         if view.locked != locked {
                             view.locked = locked;
                             cx.notify();
@@ -76,7 +77,8 @@ impl Performance {
         .detach();
         let mut view = Self {
             wireless,
-            locked: performance::automatic(wireless),
+            device,
+            locked: device.automatic(wireless),
             settings: None,
             result: None,
             message: String::new(),
@@ -85,7 +87,7 @@ impl Performance {
         view
     }
     fn request(&mut self, change: Option<Change>, cx: &mut Context<Self>) {
-        if self.result.is_some() || (change.is_some() && performance::automatic(self.wireless)) {
+        if self.result.is_some() || (change.is_some() && self.device.automatic(self.wireless)) {
             return;
         }
         let slot = self.settings.as_ref().map(|s| s.slot);
@@ -98,10 +100,11 @@ impl Performance {
         }
         .into();
         let wireless = self.wireless;
+        let device = self.device;
         std::thread::spawn(move || {
             let result = match (slot, change) {
-                (Some(slot), Some(change)) => performance::apply_for(Some(wireless), slot, change),
-                _ => performance::load_for(Some(wireless)),
+                (Some(slot), Some(change)) => device.apply(wireless, slot, change),
+                _ => device.load(wireless),
             };
             let _ = tx.send(result.map_err(|e| format!("{e:#}")));
         });
@@ -117,12 +120,12 @@ impl Render for Performance {
             .p_3()
             .rounded_lg()
             .bg(rgb(0x001c_2430))
-            .child(if self.wireless {
-                "VT7 V2 · 无线性能"
-            } else {
-                "VT7 V2 · 有线性能"
-            })
-            .when(performance::automatic(self.wireless), |this| {
+            .child(format!(
+                "{} · {}性能",
+                self.device.name(),
+                if self.wireless { "无线" } else { "有线" }
+            ))
+            .when(self.device.automatic(self.wireless), |this| {
                 this.child("自动切换已启用，手动修改已锁定。请先关闭此连接的自动切换。")
             })
             .child(
@@ -140,50 +143,64 @@ impl Render for Performance {
         if let Some(settings) = &self.settings {
             content = content
                 .child(format!("配置槽 {}", settings.slot + 1))
+                .child(format!(
+                    "鼠标保存的回报率：{}",
+                    performance::RATE_LABELS[settings.rate]
+                ))
+                .when(settings.rate > settings.max_rate, |this| {
+                    this.child("保存值高于当前连接上限，实际回报率受接收器限制。")
+                })
                 .child("回报率");
             let mut rates = div().flex().flex_wrap().gap_2();
-            for (index, label) in performance::RATE_LABELS.iter().enumerate() {
+            for (index, label) in performance::RATE_LABELS
+                .iter()
+                .enumerate()
+                .take(settings.max_rate + 1)
+            {
                 rates = rates.child(
                     choice(
                         ("rate", index),
                         label,
                         index == settings.rate,
-                        self.result.is_some() || performance::automatic(self.wireless),
+                        self.result.is_some() || self.device.automatic(self.wireless),
                     )
                     .on_click(cx.listener(move |view, _, _, cx| {
                         view.request(Some(Change::Rate(index)), cx);
                     })),
                 );
             }
-            content = content.child(rates).child("当前回报率的传感器模式");
+            content = content.child(rates).child("传感器模式");
             let rate = settings.rate;
             let mut modes = div().flex().flex_wrap().gap_2();
-            for &mode in performance::allowed_modes(rate) {
+            for &mode in self.device.allowed_modes(rate) {
                 modes = modes.child(
                     choice(
                         ("mode", usize::from(mode)),
-                        performance::MODES[usize::from(mode)],
-                        settings.modes[rate] == mode,
-                        self.result.is_some() || performance::automatic(self.wireless),
+                        self.device.mode_labels()[usize::from(mode)],
+                        settings.mode == mode,
+                        self.result.is_some() || self.device.automatic(self.wireless),
                     )
                     .on_click(cx.listener(move |view, _, _, cx| {
                         view.request(Some(Change::Mode(rate, mode)), cx);
                     })),
                 );
             }
-            content = content.child(modes).child("无线射频策略（保存到鼠标配置）");
-            for (value, label) in [(0, "智能调节"), (1, "满格射频")] {
-                content = content.child(
-                    choice(
-                        ("radio", usize::from(value)),
-                        label,
-                        settings.rf == value,
-                        self.result.is_some() || performance::automatic(self.wireless),
-                    )
-                    .on_click(cx.listener(move |view, _, _, cx| {
-                        view.request(Some(Change::Radio(value)), cx);
-                    })),
-                );
+            content = content.child(modes);
+            if let Some(radio) = settings.radio {
+                content = content.child("无线射频策略（保存到鼠标配置）");
+                for (value, label) in [(0, "智能调节"), (1, "满格射频")] {
+                    content = content.child(
+                        choice(
+                            ("radio", usize::from(value)),
+                            label,
+                            radio == value,
+                            self.result.is_some() || self.device.automatic(self.wireless),
+                        )
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            view.request(Some(Change::Radio(value)), cx);
+                        })),
+                    );
+                }
             }
         }
         content.child(

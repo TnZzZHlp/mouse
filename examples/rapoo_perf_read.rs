@@ -1,5 +1,5 @@
 use anyhow::Result;
-use mouse::performance::{self, Change};
+use mouse::performance::rapoo::{self as performance, Change};
 fn main() -> Result<()> {
     let settings = performance::load()?;
     println!("{settings:?}");

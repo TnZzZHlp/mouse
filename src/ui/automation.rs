@@ -1,7 +1,7 @@
 use gpui::{
     Context, FocusHandle, IntoElement, KeyDownEvent, Render, Timer, Window, div, prelude::*, rgb,
 };
-use mouse::{fleet::Fleet, performance};
+use mouse::{fleet::Fleet, performance::rapoo as performance};
 use std::{
     sync::mpsc::{self, Receiver},
     time::Duration,

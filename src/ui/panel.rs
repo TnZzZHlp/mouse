@@ -3,7 +3,8 @@ use mouse::fleet::{Availability, DeviceState, Fleet};
 
 pub struct Panel {
     fleet: Entity<Fleet>,
-    performance: [Option<Entity<super::performance::Performance>>; 2],
+    performance: [Option<Entity<super::performance::Performance>>; 4],
+    atk: bool,
     automation: Entity<super::automation::Automation>,
     page: usize,
     wireless: bool,
@@ -23,13 +24,33 @@ impl Panel {
                 window.remove_window();
             }
         });
+        let atk = fleet
+            .read(cx)
+            .connected()
+            .any(|s| s.identity.driver == "atk-x1-pro");
         Self {
             fleet,
-            performance: [None, None],
+            performance: [None, None, None, None],
+            atk,
             wireless: true,
             automation,
             page: 0,
             _subscriptions: vec![updates, activation],
+        }
+    }
+    fn performance_index(&self) -> usize {
+        usize::from(self.atk) * 2 + usize::from(self.wireless)
+    }
+    fn ensure_performance(&mut self, cx: &mut Context<Self>) {
+        let index = self.performance_index();
+        if self.performance[index].is_none() {
+            let device = if self.atk {
+                mouse::performance::Device::AtkX1Pro
+            } else {
+                mouse::performance::Device::Vt7V2
+            };
+            self.performance[index] =
+                Some(cx.new(|cx| super::performance::Performance::new(device, self.wireless, cx)));
         }
     }
 }
@@ -80,16 +101,8 @@ impl Render for Panel {
                             .on_click(cx.listener(
                                 move |view, _, _, cx| {
                                     view.page = index;
-                                    if index == 1
-                                        && view.performance[usize::from(view.wireless)].is_none()
-                                    {
-                                        view.performance[usize::from(view.wireless)] =
-                                            Some(cx.new(|cx| {
-                                                super::performance::Performance::new(
-                                                    view.wireless,
-                                                    cx,
-                                                )
-                                            }));
+                                    if index == 1 {
+                                        view.ensure_performance(cx);
                                     }
                                     cx.notify();
                                 },
@@ -97,6 +110,29 @@ impl Render for Panel {
                         }),
                 ),
             )
+            .when(self.page == 1, |this| {
+                this.child(
+                    div().flex().gap_2().children(
+                        [(false, "VT7 V2"), (true, "ATK X1 PRO")].into_iter().map(
+                            |(atk, label)| {
+                                super::performance::choice(
+                                    ("model", usize::from(atk)),
+                                    label,
+                                    self.atk == atk,
+                                    false,
+                                )
+                                .on_click(cx.listener(
+                                    move |view, _, _, cx| {
+                                        view.atk = atk;
+                                        view.ensure_performance(cx);
+                                        cx.notify();
+                                    },
+                                ))
+                            },
+                        ),
+                    ),
+                )
+            })
             .when(self.page == 1, |this| {
                 this.child(
                     div().flex().gap_2().children(
@@ -112,16 +148,7 @@ impl Render for Panel {
                                 .on_click(cx.listener(
                                     move |view, _, _, cx| {
                                         view.wireless = wireless;
-                                        if view.page == 1
-                                            && view.performance[usize::from(wireless)].is_none()
-                                        {
-                                            view.performance[usize::from(wireless)] =
-                                                Some(cx.new(|cx| {
-                                                    super::performance::Performance::new(
-                                                        wireless, cx,
-                                                    )
-                                                }));
-                                        }
+                                        view.ensure_performance(cx);
                                         cx.notify();
                                     },
                                 ))
@@ -146,7 +173,7 @@ impl Render for Panel {
                     .when(self.page == 0, |this| this.children(rows))
                     .when(self.page == 1, |this| {
                         this.when_some(
-                            self.performance[usize::from(self.wireless)].clone(),
+                            self.performance[self.performance_index()].clone(),
                             gpui::ParentElement::child,
                         )
                     })
