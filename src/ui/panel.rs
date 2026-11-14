@@ -1,5 +1,19 @@
-use gpui::{Context, Entity, IntoElement, Render, Subscription, Window, div, prelude::*, px, rgb};
+use gpui::{
+    Context, Entity, IntoElement, Render, Subscription, Timer, Window, div, prelude::*, px, rgb,
+};
 use mouse::fleet::{Availability, DeviceState, Fleet};
+use std::{
+    collections::HashMap,
+    sync::mpsc::{self, Receiver},
+    time::{Duration, Instant},
+};
+
+struct Parameters {
+    settings: Option<mouse::performance::rapoo::Settings>,
+    error: Option<String>,
+    received: Option<Instant>,
+}
+type ParameterResult = (String, Result<mouse::performance::rapoo::Settings, String>);
 
 pub struct Panel {
     fleet: Entity<Fleet>,
@@ -8,6 +22,10 @@ pub struct Panel {
     automation: Entity<super::automation::Automation>,
     page: usize,
     wireless: bool,
+    parameters: HashMap<String, Parameters>,
+    pending: Option<Receiver<Vec<ParameterResult>>>,
+    next_refresh: Instant,
+    revision: u64,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -28,6 +46,15 @@ impl Panel {
             .read(cx)
             .connected()
             .any(|s| s.identity.driver == "atk-x1-pro");
+        cx.spawn(async move |this, cx| {
+            loop {
+                Timer::after(Duration::from_millis(200)).await;
+                if this.update(cx, Self::refresh_parameters).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         Self {
             fleet,
             performance: [None, None, None, None],
@@ -35,6 +62,10 @@ impl Panel {
             wireless: true,
             automation,
             page: 0,
+            parameters: HashMap::new(),
+            pending: None,
+            next_refresh: Instant::now(),
+            revision: mouse::performance::rapoo::revision(),
             _subscriptions: vec![updates, activation],
         }
     }
@@ -53,15 +84,80 @@ impl Panel {
                 Some(cx.new(|cx| super::performance::Performance::new(device, self.wireless, cx)));
         }
     }
+    fn refresh_parameters(&mut self, cx: &mut Context<Self>) {
+        if let Some(results) = self.pending.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.pending = None;
+            for (id, result) in results {
+                let state = self.parameters.entry(id).or_insert(Parameters {
+                    settings: None,
+                    error: None,
+                    received: None,
+                });
+                match result {
+                    Ok(settings) => {
+                        state.settings = Some(settings);
+                        state.error = None;
+                        state.received = Some(Instant::now());
+                    }
+                    Err(error) => state.error = Some(error),
+                }
+            }
+            self.next_refresh = Instant::now() + Duration::from_secs(15);
+            cx.notify();
+        }
+        let revision = mouse::performance::rapoo::revision();
+        if self.page != 0
+            || self.pending.is_some()
+            || (Instant::now() < self.next_refresh && revision == self.revision)
+        {
+            return;
+        }
+        self.revision = revision;
+        let fleet = self.fleet.read(cx);
+        let ids: Vec<_> = fleet
+            .connected()
+            .filter(|s| s.availability == Availability::Live && supports_parameters(s))
+            .map(|s| s.identity.id.clone())
+            .collect();
+        self.parameters
+            .retain(|id, _| fleet.devices.contains_key(id));
+        self.next_refresh = Instant::now() + Duration::from_secs(15);
+        if ids.is_empty() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.pending = Some(rx);
+        std::thread::spawn(move || {
+            let results = ids
+                .into_iter()
+                .map(|id| {
+                    let result =
+                        mouse::performance::rapoo::load_device(&id).map_err(|e| format!("{e:#}"));
+                    (id, result)
+                })
+                .collect();
+            let _ = tx.send(results);
+        });
+        cx.notify();
+    }
+}
+fn supports_parameters(state: &DeviceState) -> bool {
+    let id = state.identity.id.to_ascii_lowercase();
+    state.identity.driver == "rapoo-vt7"
+        && ["pid_4660", "pid_1460", "pid_1413"]
+            .iter()
+            .any(|pid| id.contains(pid))
 }
 
 impl Render for Panel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let fleet = self.fleet.read(cx);
         let rows = fleet
-            .connected()
+            .visible()
             .enumerate()
-            .map(|(index, state)| device_row(state, index + 1))
+            .map(|(index, state)| {
+                device_row(state, index + 1, self.parameters.get(&state.identity.id))
+            })
             .collect::<Vec<_>>();
         div()
             .size_full()
@@ -88,7 +184,7 @@ impl Render for Panel {
             )
             .child(
                 div().flex().gap_2().children(
-                    ["电量", "性能", "自动切换"]
+                    ["设备", "性能", "自动切换"]
                         .into_iter()
                         .enumerate()
                         .map(|(index, label)| {
@@ -101,6 +197,9 @@ impl Render for Panel {
                             .on_click(cx.listener(
                                 move |view, _, _, cx| {
                                     view.page = index;
+                                    if index == 0 {
+                                        view.next_refresh = Instant::now();
+                                    }
                                     if index == 1 {
                                         view.ensure_performance(cx);
                                     }
@@ -187,6 +286,22 @@ impl Render for Panel {
                     .flex()
                     .justify_end()
                     .gap_4()
+                    .when(self.page == 0, |this| {
+                        this.child(
+                            div()
+                                .id("refresh-devices")
+                                .cursor_pointer()
+                                .child(if self.pending.is_some() {
+                                    "读取参数中…"
+                                } else {
+                                    "刷新参数"
+                                })
+                                .on_click(cx.listener(|view, _, _, cx| {
+                                    view.next_refresh = Instant::now();
+                                    view.refresh_parameters(cx);
+                                })),
+                        )
+                    })
                     .child(
                         div()
                             .id("close")
@@ -207,7 +322,11 @@ impl Render for Panel {
     }
 }
 
-fn device_row(state: &DeviceState, index: usize) -> impl IntoElement {
+fn device_row(
+    state: &DeviceState,
+    index: usize,
+    parameters: Option<&Parameters>,
+) -> impl IntoElement {
     let fresh = state.availability == Availability::Live;
     let color = if !fresh {
         0x008b_949e
@@ -274,6 +393,16 @@ fn device_row(state: &DeviceState, index: usize) -> impl IntoElement {
                 .text_color(rgb(0x008b_949e))
                 .child(detail),
         )
+        .child(
+            div()
+                .mt_2()
+                .text_xs()
+                .child(state.reading.and_then(|r| r.battery.dpi).map_or_else(
+                    || "DPI：暂无读数".into(),
+                    |(x, y)| format!("{}DPI：{x} × {y}", if fresh { "" } else { "上次 " }),
+                )),
+        )
+        .child(parameter_details(state, parameters))
         .when_some(state.error.clone(), |this, error| {
             this.child(
                 div()
@@ -298,4 +427,45 @@ fn device_row(state: &DeviceState, index: usize) -> impl IntoElement {
                     )),
                 ),
         )
+}
+
+fn parameter_details(state: &DeviceState, parameters: Option<&Parameters>) -> impl IntoElement {
+    let mut content = div().mt_2().flex().flex_col().gap_1().text_xs();
+    if let Some(settings) = parameters.and_then(|p| p.settings.as_ref()) {
+        let stale = state.availability != Availability::Live
+            || parameters.is_some_and(|p| p.error.is_some());
+        content = content
+            .child(format!(
+                "{}回报率：{} · 模式：{}",
+                if stale { "上次读取 · " } else { "" },
+                mouse::performance::RATE_LABELS[settings.rate],
+                mouse::performance::rapoo::MODES[usize::from(settings.modes[settings.rate])]
+            ))
+            .child(format!(
+                "射频：{} · 配置槽 {}",
+                if settings.rf == 0 {
+                    "智能调节"
+                } else {
+                    "满格射频"
+                },
+                settings.slot + 1
+            ));
+        if let Some(received) = parameters.and_then(|p| p.received) {
+            content = content.child(format!("参数读取于 {} 秒前", received.elapsed().as_secs()));
+        }
+    } else {
+        content = content.child(if supports_parameters(state) {
+            "性能参数：等待设备读取"
+        } else {
+            "性能参数：此设备暂不支持读取"
+        });
+    }
+    if let Some(error) = parameters.and_then(|p| p.error.as_ref()) {
+        content = content.child(
+            div()
+                .text_color(rgb(0x00f0_b66a))
+                .child(format!("参数读取失败：{error}")),
+        );
+    }
+    content
 }

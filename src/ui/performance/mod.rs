@@ -61,8 +61,11 @@ impl Performance {
                                     view.message = "已从设备读取并核对".into();
                                 }
                                 Err(error) => {
-                                    view.settings = None;
-                                    view.message = error;
+                                    view.message = if view.settings.is_some() {
+                                        format!("{error} · 暂时显示上次读取的参数")
+                                    } else {
+                                        error
+                                    };
                                 }
                             }
                             cx.notify();

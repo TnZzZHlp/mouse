@@ -48,6 +48,23 @@ pub struct Fleet {
 }
 
 impl Fleet {
+    pub fn visible(&self) -> impl Iterator<Item = &DeviceState> {
+        self.devices
+            .values()
+            .filter(|state| state.availability != Availability::Offline || state.reading.is_some())
+    }
+
+    pub fn display_status(&self) -> Status {
+        self.lowest_live()
+            .or_else(|| {
+                self.devices
+                    .values()
+                    .filter(|state| state.reading.is_some())
+                    .max_by_key(|state| state.reading.map(|reading| reading.received_at))
+            })
+            .map_or(Status::Searching, DeviceState::status)
+    }
+
     pub fn connected(&self) -> impl Iterator<Item = &DeviceState> {
         self.devices
             .values()
@@ -134,6 +151,57 @@ mod tests {
     }
 
     #[test]
+    fn display_keeps_cached_reading_until_a_new_report_arrives() {
+        let identity = DeviceIdentity {
+            id: "a".into(),
+            driver: "test",
+            name: "Mouse",
+        };
+        let reading = Reading {
+            battery: Battery {
+                percent: 55,
+                charging: Charging::Discharging,
+                raw_charging: 0,
+                dpi: Some((800, 800)),
+            },
+            received_at: std::time::UNIX_EPOCH,
+            kind: ReportKind::Broadcast,
+        };
+        let mut fleet = Fleet::default();
+        assert_eq!(fleet.display_status(), Status::Searching);
+        fleet.apply(DeviceState {
+            identity: identity.clone(),
+            availability: Availability::Live,
+            reading: Some(reading),
+            error: None,
+        });
+        fleet.reconcile(&[]);
+        assert_eq!(fleet.connected().count(), 0);
+        assert_eq!(fleet.visible().count(), 1);
+        assert_eq!(
+            fleet.display_status(),
+            Status::Stale(identity.clone(), Some(reading))
+        );
+        fleet.apply(DeviceState::new(identity.clone()));
+        assert_eq!(fleet.display_status().reading(), Some(reading));
+        let fresh = Reading {
+            battery: Battery {
+                percent: 60,
+                ..reading.battery
+            },
+            received_at: reading.received_at + std::time::Duration::from_secs(10),
+            ..reading
+        };
+        fleet.apply(DeviceState {
+            identity: identity.clone(),
+            availability: Availability::Live,
+            reading: Some(fresh),
+            error: None,
+        });
+        assert_eq!(fleet.display_status(), Status::Live(identity, fresh));
+    }
+
+    #[test]
     fn tray_minimum_excludes_old_readings() {
         let mut fleet = Fleet::default();
         for (id, percent, availability) in [
@@ -164,6 +232,10 @@ mod tests {
         assert_eq!(
             fleet.lowest_live().map(|state| state.identity.id.as_str()),
             Some("c")
+        );
+        assert_eq!(
+            fleet.display_status().reading().unwrap().battery.percent,
+            18
         );
     }
 }

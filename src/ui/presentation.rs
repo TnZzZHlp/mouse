@@ -71,14 +71,14 @@ pub fn device_summary(state: &mouse::fleet::DeviceState) -> String {
 }
 
 pub fn fleet_tooltip(fleet: &mouse::fleet::Fleet) -> String {
-    if fleet.connected().next().is_none() {
+    if fleet.visible().next().is_none() {
         return fleet
             .discovery_error
             .clone()
             .unwrap_or_else(|| "正在查找支持的鼠标".into());
     }
     let text = fleet
-        .connected()
+        .visible()
         .enumerate()
         .map(|(index, state)| {
             format!(

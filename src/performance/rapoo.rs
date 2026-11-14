@@ -4,6 +4,10 @@ use hidapi::{HidApi, HidDevice};
 use std::{sync::Mutex, thread, time::Duration};
 
 static IO: Mutex<()> = Mutex::new(());
+static REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub fn revision() -> u64 {
+    REVISION.load(std::sync::atomic::Ordering::Relaxed)
+}
 static AUTOMATIC: [std::sync::atomic::AtomicBool; 2] =
     [const { std::sync::atomic::AtomicBool::new(false) }; 2];
 pub fn set_automatic(wireless: bool, enabled: bool) {
@@ -60,6 +64,9 @@ fn collection_group(path: &str) -> String {
 }
 impl Connection {
     fn open(link: Option<bool>) -> Result<Self> {
+        Self::open_selected(link, None)
+    }
+    fn open_selected(link: Option<bool>, path: Option<&str>) -> Result<Self> {
         let api = HidApi::new()?;
         let devices: Vec<_> = api
             .device_list()
@@ -70,6 +77,9 @@ impl Connection {
             })
             .collect();
         let mut candidates: Vec<_> = devices.iter().filter(|d| d.usage() == 2).collect();
+        if let Some(path) = path {
+            candidates.retain(|d| d.path().to_string_lossy().eq_ignore_ascii_case(path));
+        }
         if let Some(wireless) = link {
             candidates.retain(|d| (d.product_id() != 0x4660) == wireless);
         }
@@ -175,6 +185,10 @@ impl Connection {
 pub fn load() -> Result<Settings> {
     load_for(None)
 }
+pub fn load_device(path: &str) -> Result<Settings> {
+    let _guard = IO.lock().map_err(|_| anyhow::anyhow!("配置锁异常"))?;
+    Connection::open_selected(None, Some(path))?.settings()
+}
 pub fn load_for(link: Option<bool>) -> Result<Settings> {
     let _guard = IO.lock().map_err(|_| anyhow::anyhow!("配置锁异常"))?;
     Connection::open(link)?.settings()
@@ -213,6 +227,7 @@ pub fn apply_for(link: Option<bool>, expected_slot: u8, change: Change) -> Resul
         }
     };
     connection.command(0xa5, address, &[value], 1)?;
+    REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     ensure!(
         connection.read(address, 1)?[0] == value,
         "写入后回读不一致，请刷新检查设备"
@@ -231,6 +246,7 @@ pub fn apply_profile(wireless: bool, rate: usize, mode: u8) -> Result<Settings> 
     let base = 1536 + u32::from(before.slot) * 1024;
     let mode_address = base + 732 + u32::try_from(rate)?;
     connection.command(0xa5, mode_address, &[mode], 1)?;
+    REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     ensure!(
         connection.read(mode_address, 1)?[0] == mode,
         "模式回读不一致"

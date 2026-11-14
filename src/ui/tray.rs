@@ -101,9 +101,7 @@ impl Runtime {
                 Event::Snapshot(fleet) => {
                     self.automation
                         .update(cx, |view, cx| view.observe(&fleet, cx));
-                    let status = fleet
-                        .lowest_live()
-                        .map_or(Status::Searching, mouse::fleet::DeviceState::status);
+                    let status = fleet.display_status();
                     let tooltip = presentation::fleet_tooltip(&fleet);
                     self.tray.set_tooltip(Some(&tooltip))?;
                     if status.reading().map(|reading| reading.battery)
@@ -137,7 +135,7 @@ impl Runtime {
         }
         let fleet = self.fleet.clone();
         let automation = self.automation.clone();
-        let count = fleet.read(cx).connected().count();
+        let count = fleet.read(cx).visible().count();
         let height = f32::from(u16::try_from(count.clamp(1, 4))?)
             .mul_add(134., 112.)
             .max(580.);
